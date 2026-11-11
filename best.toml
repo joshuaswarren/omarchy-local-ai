@@ -29,8 +29,3 @@ recipes = ["glm-5.3-flash-tensorfold-pair"]
 gpu = "apple-silicon"
 ram_class = 96
 recipes = ["qwen3.8-27b-llamacpp-vulkan"]
-
-[[class]]
-gpu = "apple-silicon"
-ram_class = 32
-recipes = ["qwen3.5-4b-llamacpp-vulkan"]
