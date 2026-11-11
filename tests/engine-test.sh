@@ -153,6 +153,21 @@ check("an N1x laptop has a unified NVIDIA GPU of its own family", n1x["ram_class
 spark = dict(recipe, hardware=[{"gpu": "nvidia-gb10", "ram_class": 128, "measured": "measurements/model.toml"}])
 check("an N1x runs what a GB10 with the same memory runs", a.qualified(spark, n1x, n1x["gpus"][0]) and a.match_class({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128)]}, n1x, n1x["gpus"][0]) is not None)
 check("best treats the N1x and GB10 as one class", any("same selectors" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128, recipes=["spark"]), dict(entry, gpu="nvidia-n1x", ram_class=128, recipes=["spark"])]}, {"spark": spark})))
+import tempfile
+with tempfile.TemporaryDirectory() as drm:
+  for node, driver in (("renderD128", "apple"), ("renderD129", "asahi")):
+    os.makedirs(os.path.join(drm, "drivers", driver), exist_ok=True)
+    os.makedirs(os.path.join(drm, node, "device"))
+    os.symlink(os.path.join(drm, "drivers", driver), os.path.join(drm, node, "device", "driver"))
+  check("the Apple render node is the one the GPU driver owns", a.apple_render_node(drm) == "/dev/dri/renderD129")
+  check("no render node when the GPU driver is absent", a.apple_render_node(os.path.join(drm, "missing")) == "")
+with patch.object(a, "platform_name", return_value="aarch64-apple"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "apple_render_node", return_value="/dev/dri/renderD128"), patch.object(a, "meminfo", return_value={"MemTotal": 90 * 2**30}):
+  apple = a.machine_profile()
+check("an Apple Silicon machine has a unified GPU of its own family", apple["ram_class"] == 96 and [(g["vendor"], g["family"], g["render_node"], g["memory_gib"]) for g in apple["gpus"]] == [("apple", "apple-silicon", "/dev/dri/renderD128", 90)])
+with patch.object(a, "platform_name", return_value="aarch64-apple"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "apple_render_node", return_value=""), patch.object(a, "meminfo", return_value={"MemTotal": 90 * 2**30}):
+  raises("an Apple machine without a GPU render node has no GPU", lambda: a.choose_gpu(a.machine_profile()), "No supported GPU")
+apple_gpu = apple["gpus"][0]
+check("an Apple GPU runs render-device runtimes only", a.runtime_supports({"run": {"devices": ["render"]}}, apple_gpu) and not a.runtime_supports({"run": {"devices": ["render", "kfd"]}}, apple_gpu) and not a.runtime_supports({"run": {"devices": ["cdi-nvidia"]}}, apple_gpu) and not a.runtime_supports({"run": {}}, apple_gpu))
 check("GPU peak exceeding capacity does not fit", not a.fits(dict(variant, peak_gpu_gib=49), profile, gpu)[0])
 check("RAM fit preserves desktop reserve", not a.fits(dict(variant, peak_ram_gib=57), profile, gpu)[0])
 with patch.object(a, "free_memory", return_value=(1, 1)), patch.object(a, "top_memory_users", return_value="browser (12 GiB), editor (4 GiB)"), patch.object(a.time, "sleep"):
