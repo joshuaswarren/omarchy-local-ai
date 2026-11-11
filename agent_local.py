@@ -53,10 +53,10 @@ GFX_FAMILIES = {"gfx1151": "amd-strix-halo", "gfx1150": "amd-strix-point"}
 # laptop: it keeps its own family name so a measurement records which machine it came from,
 # but it runs what a GB10 with the same memory runs.
 NVIDIA_UNIFIED_FAMILIES = {"aarch64-gb10": "nvidia-gb10", "aarch64-n1x": "nvidia-n1x"}
-# Apple Silicon: the GPU shares the system's memory and its DRM driver is `asahi`, so the render node
-# is the one that driver owns (the display engine's `apple` driver has none).
+# Apple Silicon: the GPU shares the system's memory. The render node is the one owned by the GPU driver, named
+# `asahi` on most kernels and `aurora` on the Omarchy M kernel (the display engine's `apple` driver has none).
 APPLE_UNIFIED_FAMILIES = {"aarch64-apple": "apple-silicon"}
-APPLE_DRM_DRIVER = "asahi"
+APPLE_GPU_DRIVERS = ("asahi", "aurora")
 # Families that share recipes, qualification and recommendations: only memory sets them apart.
 GPU_CLASSES = {"nvidia-n1x": "nvidia-gb10"}
 
@@ -232,7 +232,7 @@ def apple_render_node(drm_root="/sys/class/drm"):
   except OSError:
     return ""
   for name in names:
-    if name.startswith("renderD") and os.path.basename(os.path.realpath(os.path.join(drm_root, name, "device", "driver"))) == APPLE_DRM_DRIVER:
+    if name.startswith("renderD") and os.path.basename(os.path.realpath(os.path.join(drm_root, name, "device", "driver"))) in APPLE_GPU_DRIVERS:
       return f"/dev/dri/{name}"
   return ""
 

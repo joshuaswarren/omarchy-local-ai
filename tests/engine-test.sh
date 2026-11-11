@@ -155,11 +155,13 @@ check("an N1x runs what a GB10 with the same memory runs", a.qualified(spark, n1
 check("best treats the N1x and GB10 as one class", any("same selectors" in e for e in a.validate_best({"class": [dict(entry, gpu="nvidia-gb10", ram_class=128, recipes=["spark"]), dict(entry, gpu="nvidia-n1x", ram_class=128, recipes=["spark"])]}, {"spark": spark})))
 import tempfile
 with tempfile.TemporaryDirectory() as drm:
-  for node, driver in (("renderD128", "apple"), ("renderD129", "asahi")):
+  for node, driver in (("renderD128", "apple"), ("renderD129", "aurora"), ("renderD130", "asahi")):
     os.makedirs(os.path.join(drm, "drivers", driver), exist_ok=True)
     os.makedirs(os.path.join(drm, node, "device"))
     os.symlink(os.path.join(drm, "drivers", driver), os.path.join(drm, node, "device", "driver"))
-  check("the Apple render node is the one the GPU driver owns", a.apple_render_node(drm) == "/dev/dri/renderD129")
+  check("the Apple render node is the first one a GPU driver owns", a.apple_render_node(drm) == "/dev/dri/renderD129")
+  os.unlink(os.path.join(drm, "renderD129", "device", "driver"))
+  check("the asahi driver counts too", a.apple_render_node(drm) == "/dev/dri/renderD130")
   check("no render node when the GPU driver is absent", a.apple_render_node(os.path.join(drm, "missing")) == "")
 with patch.object(a, "platform_name", return_value="aarch64-apple"), patch.object(a, "amd_gpus", return_value=[]), patch.object(a, "apple_render_node", return_value="/dev/dri/renderD128"), patch.object(a, "meminfo", return_value={"MemTotal": 90 * 2**30}):
   apple = a.machine_profile()
