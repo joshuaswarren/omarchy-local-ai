@@ -1,0 +1,39 @@
+name = "Qwen3.8 27B"
+summary = "Dense 27B at 4-bit on the Apple Silicon GPU. A solid agent model that leaves most of a 96 GB Mac free for the desktop."
+runtime = "llamacpp-vulkan"
+vendor = "qwen"
+architecture = "dense"
+input = ["text"]
+
+[[hardware]]
+gpu = "apple-silicon"
+ram_class = 96
+measured = "measurements/qwen3.8-27b-llamacpp-vulkan-apple-silicon-96.toml"
+
+# Unsloth's dynamic 4-bit build. The runtime's llama.cpp loads it whole into GPU memory (no mmap), so the weights
+# count once.
+[[artifacts]]
+repo = "unsloth/Qwen3.8-27B-GGUF"
+revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+license = "apache-2.0"
+files = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+
+# Weights are 16.4 GiB. The rest is the KV cache and the compute buffers.
+[[variant]]
+ctx = 65536
+peak_ram_gib = 24
+peak_gpu_gib = 23
+
+[[variant]]
+ctx = 32768
+peak_ram_gib = 21
+peak_gpu_gib = 20
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+[server]
+args = ["--no-mmap", "--parallel", "1", "--jinja"]
