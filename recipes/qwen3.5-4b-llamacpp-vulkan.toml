@@ -29,4 +29,4 @@ top_p = 0.95
 top_k = 20
 
 [server]
-args = ["--no-mmap", "--parallel", "1", "--jinja"]
+args = ["--load-mode", "none", "--parallel", "1", "--jinja"]

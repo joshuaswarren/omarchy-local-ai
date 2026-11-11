@@ -10,7 +10,7 @@ gpu = "apple-silicon"
 ram_class = 96
 measured = "measurements/qwen3.8-27b-llamacpp-vulkan-apple-silicon-96.toml"
 
-# Unsloth's dynamic 4-bit build. The runtime's llama.cpp loads it whole into GPU memory (no mmap), so the weights
+# Unsloth's dynamic 4-bit build. The runtime's llama.cpp reads it whole into GPU memory (--load-mode none), so the weights
 # count once.
 [[artifacts]]
 repo = "unsloth/Qwen3.8-27B-GGUF"
@@ -36,4 +36,4 @@ top_p = 0.95
 top_k = 20
 
 [server]
-args = ["--no-mmap", "--parallel", "1", "--jinja"]
+args = ["--load-mode", "none", "--parallel", "1", "--jinja"]
