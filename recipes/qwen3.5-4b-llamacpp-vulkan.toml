@@ -1,0 +1,32 @@
+name = "Qwen3.5 4B"
+summary = "Dense 4B at 4-bit on the Apple Silicon GPU. Small enough for a 16 GB Mac, with room left for the desktop."
+runtime = "llamacpp-vulkan"
+vendor = "qwen"
+architecture = "dense"
+input = ["text"]
+
+[[hardware]]
+gpu = "apple-silicon"
+ram_class = 32
+measured = "measurements/qwen3.5-4b-llamacpp-vulkan-apple-silicon-32.toml"
+
+[[artifacts]]
+repo = "unsloth/Qwen3.5-4B-GGUF"
+revision = "e87f176479d0855a907a41277aca2f8ee7a09523"
+license = "apache-2.0"
+files = ["Qwen3.5-4B-Q4_K_M.gguf"]
+model = "Qwen3.5-4B-Q4_K_M.gguf"
+
+# Weights are 2.6 GiB. The rest is the KV cache and the compute buffers.
+[[variant]]
+ctx = 32768
+peak_ram_gib = 5
+peak_gpu_gib = 4.5
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+[server]
+args = ["--no-mmap", "--parallel", "1", "--jinja"]
