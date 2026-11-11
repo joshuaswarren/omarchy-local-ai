@@ -19,16 +19,12 @@ license = "apache-2.0"
 files = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
 model = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
 
-# Weights are 16.4 GiB. The rest is the KV cache and the compute buffers.
+# Weights are 16.4 GiB. Context is capped at 8192 tokens: a 32768-token prompt faults the GPU on
+# this driver, and 8192 is the largest prompt measured clean. `use best` serves the largest variant.
 [[variant]]
-ctx = 65536
-peak_ram_gib = 24
-peak_gpu_gib = 23
-
-[[variant]]
-ctx = 32768
-peak_ram_gib = 21
-peak_gpu_gib = 20
+ctx = 8192
+peak_ram_gib = 22
+peak_gpu_gib = 22
 
 [sampling]
 temperature = 1.0
