@@ -4196,8 +4196,10 @@ def max_output_tokens(manifest):
   try:
     tokens = int(value)
   except (TypeError, ValueError):
-    return DEFAULT_MAX_OUTPUT_TOKENS
-  return min(tokens, manifest["variant"]["ctx"]) if tokens > 0 else DEFAULT_MAX_OUTPUT_TOKENS
+    tokens = DEFAULT_MAX_OUTPUT_TOKENS
+  if tokens <= 0:
+    tokens = DEFAULT_MAX_OUTPUT_TOKENS
+  return min(tokens, manifest["variant"]["ctx"])
 
 
 def model_inputs(manifest):
