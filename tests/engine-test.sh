@@ -692,6 +692,7 @@ check("a variant's reply cap counts too", a.max_output_tokens({"recipe": recipe,
 shipped = tomllib.load(open(os.path.join(os.environ["ENGINE_ROOT"], "recipes", "qwen3.8-27b-tensorfold.toml"), "rb"))
 check("shipped recipes give agents a 64k reply cap", all(a.max_output_tokens({"recipe": shipped, "variant": v}) == 65536 for v in shipped["variant"]))
 check("the reply cap leaves half the context for the prompt", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 8192}}) == 4096)
+check("the reply cap never exceeds the context", a.max_output_tokens({"recipe": capped, "variant": {"ctx": 8192}}) <= 8192)
 # Agents re-send every screenshot they have read, and tensorfold takes only 4 images per request by default.
 recipe_dir = os.path.join(os.environ["ENGINE_ROOT"], "recipes")
 seeing = [tomllib.load(open(os.path.join(recipe_dir, name), "rb"))["server"]["args"] for name in sorted(os.listdir(recipe_dir)) if "tensorfold" in name]
