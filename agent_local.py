@@ -1352,6 +1352,19 @@ def prune_filesets(rid, keep):
       pass
 
 
+def marker_path(rid, fileset):
+  return os.path.join(fileset_dir(rid, fileset), ".complete")
+
+
+def write_marker(rid, fileset):
+  """The unit's ExecStartPre gate tests this file, so a container can never start on an
+  auto-created empty mount: minefield trap 142, the missing bind source."""
+  path = marker_path(rid, fileset)
+  if not os.path.exists(path):
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    os.close(fd)
+
+
 def materialize(rid, files, roles, seed_dir=None, progress=None):
   """Fetch a run's files and link them into their own file-set directory.
   Returns the file set id the unit mounts."""
@@ -1375,6 +1388,7 @@ def materialize(rid, files, roles, seed_dir=None, progress=None):
   fileset = fileset_id(files)
   target = fileset_dir(rid, fileset)
   if os.path.isdir(target):
+    write_marker(rid, fileset)
     return fileset
   staging = target + ".partial"
   shutil.rmtree(staging, ignore_errors=True)
@@ -1391,6 +1405,7 @@ def materialize(rid, files, roles, seed_dir=None, progress=None):
       raise LocalError(f"Refusing a file outside the model directory: {record['dest']}")
     os.link(blob_path(record), dest)
   os.replace(staging, target)
+  write_marker(rid, fileset)
   return fileset
 
 
@@ -1502,6 +1517,9 @@ def render_container(rid, recipe, runtime, variant, roles, gpu, fileset):
     f"ContainerName={unit_base(rid)}",
     f"Image={runtime['image']}",
     f"Label=org.omarchy.agent-local.recipe={rid}",
+    # A missing weights dir would be auto-created by the container mount and start hollow
+    # (minefield 142): the unit refuses to start until materialize has written the marker.
+    f"ExecStartPre=/usr/bin/env test -f %h/.local/share/omarchy/agent-local/models/{rid}/{fileset}/.complete",
   ]
   if pair:
     # Rank 0 shares the host's network to reach rank 1 over the cable; its API listens on
