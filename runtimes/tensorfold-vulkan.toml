@@ -5,9 +5,9 @@
 # only, with at most 7168 tokens of context. It refuses a request with a temperature above 0, so the runtime maps no
 # sampling inputs. Configured by `tensorfold-native serve` arguments, with the model directory bare and the key in
 # TENSORFOLD_API_KEY.
-image = "ghcr.io/joshuaswarren/tensorfold-vulkan@sha256:60e13375ea9e35073eed957ce7730f92ffb1737524fc9c75c53e2b59559a767d"
+image = "ghcr.io/joshuaswarren/tensorfold-vulkan@sha256:c8bae563c000af5786323eb580421edd9ebc075c02d6c694c1dcf80f987f0ed8"
 tier = "third-party"
-review = "reviews/tensorfold-vulkan-60e13375ea9e.toml"
+review = "reviews/tensorfold-vulkan-c8bae563c000.toml"
 port = 8888
 command = ["tensorfold-native", "serve", "--backend", "vulkan", "--host", "0.0.0.0", "--port", "8888", "--no-update-check"]
 health = { probe = ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8888/health"] }
