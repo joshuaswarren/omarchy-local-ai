@@ -849,7 +849,6 @@ class Catalog:
     self.root = root
     with open(os.path.join(root, "catalog.toml"), "rb") as handle:
       self.meta = tomllib.load(handle)
-    self.version = self.meta.get("version", "unknown")
     self.runtimes = _load_toml_dir(root, "runtimes")
     self.recipes = _load_toml_dir(root, "recipes")
     with open(os.path.join(root, "best.toml"), "rb") as handle:
@@ -2720,7 +2719,7 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
 def _lookup_recipe(catalog, target):
   if target not in catalog.recipes:
     known = ", ".join(sorted(catalog.recipes)) or "none"
-    raise LocalError(f"No recipe '{target}' in catalog {catalog.version} (known: {known})")
+    raise LocalError(f"No recipe '{target}' (known: {known})")
   return catalog.recipes[target]
 
 
@@ -2834,7 +2833,6 @@ def detach_use(rid, args, recipe, measured_load=None):
 def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=None):
   recipe = catalog.recipes[rid]
   runtime = catalog.runtimes[recipe["runtime"]]
-  catalog_info = {"version": catalog.version}
   if runtime.get("tier") == "third-party":
     review = load_review(catalog, runtime)
     say(f"Runtime {recipe['runtime']} is third-party: {review.get('publisher', 'unknown publisher')}, license {review.get('license_url', 'unknown')}")
@@ -2860,7 +2858,6 @@ def _use_setup(rid, variant, args, catalog, profile, gpu, fresh, measured_load=N
     "schema": SCHEMA,
     "recipe_id": rid,
     "runtime_id": recipe["runtime"],
-    "catalog": catalog_info,
     "profile": profile,
     "gpu": gpu["family"],
     "variant": variant,
@@ -2937,7 +2934,7 @@ def cmd_list(argv):
     return 0
   gpu = profile["gpus"][0]["family"] if profile["gpus"] else "no GPU"
   paired = f" · linked to {profile['pair']['host']}" if profile.get("pair") else ""
-  say(f"Catalog {catalog.version} · this machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
+  say(f"This machine: {gpu}, {profile['ram_class']} GB, {profile['platform']}{paired}")
   for row in rows:
     marks = [mark for mark, on in (("best", row["best"]), ("running", row["active"]), ("installed", row["installed"])) if on]
     tier = f" · third-party ({row['publisher']})" if row["tier"] == "third-party" else ""
@@ -3005,7 +3002,6 @@ def model_record(rid, manifest, profile):
     "result": props.get("Result", ""),
     "port": port_for(rid),
     "endpoint": endpoint(rid),
-    "catalog_version": manifest.get("catalog", {}).get("version"),
     "observed": observed or None,
     # What the panel's memory bar is a share of: a paired model's machines together.
     "ram_total_gib": nodes_ram_gib(manifest, profile),
@@ -3030,7 +3026,6 @@ def status_record(catalog, profile):
     "share_error": _read(share_error_path()),
     "last": last_model_id(),
     "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1),
-    "catalog_version": catalog.version,
     "best": None,
     # A Spark on the cable: none, available (not set up yet: address, host) or linked (host).
     "link": {"state": "linked", "host": profile["pair"]["host"]} if profile.get("pair") else link_state(),
@@ -3072,6 +3067,13 @@ def write_status(catalog, profile, transitions=None, pending=None, publish=True)
       if error != record["share_error"]:
         record["share_error"] = error
         write_atomic(os.path.join(state_dir(), "status.json"), json.dumps(record, indent=2) + "\n")
+    # Every setup, removal, start and refresh passes through here, so pi's
+    # extension follows them, under the same lock so an older writer can't put
+    # back a model a newer one removed. A failure to write it never fails theirs.
+    try:
+      sync_pi_extension()
+    except OSError:
+      pass
     return record
 
 
@@ -3116,7 +3118,6 @@ def cmd_status(argv):
       tail = journal_tail(rid, 5)
       if tail:
         say("  " + tail.replace("\n", "\n  "))
-  say(f"Catalog {record['catalog_version']}")
   if record["best"] and record["best"] not in record["models"]:
     say(f"The recommendation for this machine is {record['best']}: omarchy agent local use best")
   return 0
@@ -3407,7 +3408,6 @@ def install_row(rid, record):
     "result": "",
     "port": None,
     "endpoint": "",
-    "catalog_version": None,
     "observed": None,
     "since_ms": record.get("since_ms"),
     "expected_load_seconds": record.get("expected_load_seconds"),
@@ -3430,7 +3430,7 @@ def publish_installing(rid, record):
     except (OSError, ValueError):
       status = None
     if not isinstance(status, dict) or not isinstance(status.get("models"), dict):
-      status = {"models": {}, "last": None, "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1), "catalog_version": None, "best": None}
+      status = {"models": {}, "last": None, "ram_total_gib": round(gib(meminfo().get("MemTotal", 0)), 1), "best": None}
     # An installed model's own row wins: setting up a recipe again leaves it listed as it is.
     if status["models"].get(rid, {}).get("unit", "installing") != "installing":
       return
@@ -3504,7 +3504,7 @@ def cmd_refresh(argv):
   refresh_list_cache(catalog, profile)
   write_status(catalog, profile)
   if not args.quiet:
-    say(f"Catalog {catalog.version}")
+    say("Refreshed what fits this machine")
   return 0
 
 
@@ -3702,7 +3702,6 @@ def shared_listing(record, catalog, profile, dns):
     "host": dns.split(".")[0],
     "dns": dns,
     "ram_total_gib": record["ram_total_gib"],
-    "catalog_version": record["catalog_version"],
     "models": models,
   }
 
@@ -3715,10 +3714,18 @@ def publish_shares(record, catalog, profile, force=False):
     published = _read(published_path())
     if not shares and not published and not force:
       return
+    # Without tailscaled running, as for a while after boot, there is nothing
+    # to publish to, and the survey already says the tailnet is missing. The
+    # serve routes outlast a restart, so the next refresh brings them in line.
+    status = tailscale_status()
+    if not status and not force:
+      return
     try:
-      dns = self_dns()
+      dns = self_dns(status)
       have = serve_handlers(dns)
-      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{port_for(rid)}" for rid in shares if rid in record["models"]}
+      want = {f"{SHARE_ROOT}/{rid}": f"http://127.0.0.1:{SHARE_PROXY_PORT}/{rid}" for rid in shares if rid in record["models"]}
+      if want:
+        ensure_share_proxy()
       for path, target in want.items():
         if (have.get(path) or {}).get("Proxy") != target:
           serve_set(path, target)
@@ -3735,6 +3742,7 @@ def publish_shares(record, catalog, profile, force=False):
           serve_off(LISTING_ROUTE)
         if os.path.exists(published_path()):
           os.unlink(published_path())
+        stop_share_proxy()
       if os.path.exists(share_error_path()):
         os.unlink(share_error_path())
     except LocalError as error:
@@ -3791,6 +3799,236 @@ def cmd_share(argv):
   return 0
 
 
+# ---------------------------------------------------------------- share proxy
+#
+# `tailscale serve` hands a shared model's requests to one loopback proxy at
+# /<recipe> instead of to the model's own port, so this machine can tell who
+# is using it: serve puts the caller's tailnet address in X-Forwarded-For. The
+# proxy forwards every request untouched, key check included, and streams the
+# answer back as it comes. A machine whose request the model accepted counts
+# as using it for ACTIVE_CLIENT_MS after its last one; clients.json holds the
+# count per shared model, rewritten only when a count changes.
+
+SHARE_PROXY_PORT = 11430
+SHARE_PROXY_UNIT = "omarchy-agent-local-share.service"
+ACTIVE_CLIENT_MS = 5 * 60 * 1000
+HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"}
+
+
+def clients_path():
+  return os.path.join(state_dir(), "clients.json")
+
+
+def share_proxy_unit_path():
+  return os.path.join(home(), ".config", "systemd", "user", SHARE_PROXY_UNIT)
+
+
+def ensure_share_proxy():
+  """The proxy runs while anything is shared: written, reloaded and started on first need."""
+  text = "\n".join([
+    "[Unit]",
+    "Description=Omarchy local AI: count who uses the shared models",
+    "",
+    "[Service]",
+    "ExecStart=/usr/bin/env omarchy-agent-local share-proxy",
+    "Restart=on-failure",
+    "",
+  ])
+  path = share_proxy_unit_path()
+  if _read(path) != text.strip():
+    write_atomic(path, text)
+    systemctl("daemon-reload")
+  result = systemctl("start", SHARE_PROXY_UNIT)
+  if result.returncode != 0:
+    raise LocalError(f"Can't start the share proxy: {result.stderr.strip()}")
+
+
+def stop_share_proxy():
+  if os.path.exists(share_proxy_unit_path()):
+    systemctl("stop", SHARE_PROXY_UNIT)
+
+
+class ClientTracker:
+  """The machines using each shared model, by the time of their last accepted request."""
+
+  def __init__(self, path, window_ms=ACTIVE_CLIENT_MS, clock=lambda: int(time.time() * 1000)):
+    self.path = path
+    self.window_ms = window_ms
+    self.clock = clock
+    self.seen = {}
+    self.written = None
+    self.lock = threading.Condition()
+
+  def _prune(self, now):
+    for rid in list(self.seen):
+      self.seen[rid] = {client: at for client, at in self.seen[rid].items() if now - at < self.window_ms}
+      if not self.seen[rid]:
+        del self.seen[rid]
+
+  def _write(self):
+    counts = {rid: len(clients) for rid, clients in sorted(self.seen.items())}
+    if counts != self.written:
+      write_atomic(self.path, json.dumps({"models": counts}, sort_keys=True) + "\n")
+      self.written = counts
+
+  def saw(self, rid, client):
+    with self.lock:
+      now = self.clock()
+      self.seen.setdefault(rid, {})[client] = now
+      self._prune(now)
+      self._write()
+      self.lock.notify()
+
+  def expire(self):
+    """Drop machines past the window, and say how long until the next one lapses."""
+    with self.lock:
+      now = self.clock()
+      self._prune(now)
+      self._write()
+      times = [at for clients in self.seen.values() for at in clients.values()]
+      return (min(times) + self.window_ms - now) / 1000 if times else None
+
+  def run_expiry(self):
+    # Held across the deadline check and the wait, so a machine saw() adds in
+    # between can't slip past its notify. The condition's lock is reentrant.
+    with self.lock:
+      while True:
+        wait = self.expire()
+        self.lock.wait(timeout=None if wait is None else max(wait, 0.05))
+
+
+def proxy_client(headers, address):
+  forwarded = str(headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+  try:
+    return str(ipaddress.ip_address(forwarded))
+  except ValueError:
+    return address
+
+
+def make_share_proxy(tracker, ports=None, shares=None):
+  import http.client
+  import http.server
+  ports = ports or load_ports
+  shares = shares or shared_recipes
+
+  class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+      pass
+
+    def _body(self):
+      """The request body as the model gets it: passed through in bounded
+      blocks as it arrives, never held whole, so a caller without the key
+      can't fill the proxy's memory before the model refuses it."""
+      if "chunked" in str(self.headers.get("Transfer-Encoding") or "").lower():
+        def chunks():
+          while True:
+            size = int(self.rfile.readline(1024).split(b";")[0].strip() or b"0", 16)
+            if size == 0:
+              while self.rfile.readline(1024).strip():
+                pass
+              return
+            while size > 0:
+              block = self.rfile.read(min(size, 65536))
+              if not block:
+                return
+              size -= len(block)
+              yield block
+            self.rfile.readline(1024)
+        return chunks(), True
+      length = int(self.headers.get("Content-Length") or 0)
+      if length <= 0:
+        return None, False
+      rfile = self.rfile
+
+      class Remaining:
+        def read(self, size=65536):
+          nonlocal length
+          block = rfile.read(min(size, length)) if length > 0 else b""
+          length -= len(block)
+          return block
+
+      return Remaining(), False
+
+    def _refuse(self, status):
+      # The body is left unread, so the connection can't be reused for another request.
+      self.close_connection = True
+      self.send_response(status)
+      self.send_header("Content-Length", "0")
+      self.send_header("Connection", "close")
+      self.end_headers()
+
+    def _forward(self):
+      rid, _, rest = self.path.lstrip("/").partition("/")
+      port = ports().get(rid)
+      if not ID_RE.match(rid) or rid not in shares() or not port:
+        return self._refuse(404)
+      body, chunked = self._body()
+      headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP_HEADERS and name.lower() != "host"}
+      upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
+      try:
+        upstream.request(self.command, "/" + rest, body=body, headers=headers, encode_chunked=chunked)
+        answer = upstream.getresponse()
+      except OSError:
+        upstream.close()
+        return self._refuse(502)
+      # Only a request the model accepted counts: a wrong key or a bad path doesn't.
+      if answer.status < 400:
+        tracker.saw(rid, proxy_client(self.headers, self.client_address[0]))
+      try:
+        self.send_response(answer.status, answer.reason)
+        for name, value in answer.getheaders():
+          if name.lower() not in HOP_HEADERS and name.lower() != "content-length":
+            self.send_header(name, value)
+        length = answer.getheader("Content-Length")
+        if self.command == "HEAD":
+          self.send_header("Content-Length", length or "0")
+          self.end_headers()
+        elif length is not None:
+          self.send_header("Content-Length", length)
+          self.end_headers()
+          while chunk := answer.read1(65536):
+            self.wfile.write(chunk)
+        else:
+          # A streamed reply (server-sent events) goes out chunk by chunk as it arrives.
+          self.send_header("Transfer-Encoding", "chunked")
+          self.end_headers()
+          while chunk := answer.read1(65536):
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+            self.wfile.flush()
+          self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+      finally:
+        upstream.close()
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = _forward
+
+  return Handler
+
+
+def cmd_share_proxy(argv):
+  import http.server
+  argparse.ArgumentParser(prog="omarchy agent local share-proxy").parse_args(argv)
+  tracker = ClientTracker(clients_path())
+  tracker.expire()
+  server = http.server.ThreadingHTTPServer(("127.0.0.1", SHARE_PROXY_PORT), make_share_proxy(tracker))
+  server.daemon_threads = True
+  threading.Thread(target=tracker.run_expiry, daemon=True).start()
+
+  def stop(*_):
+    raise SystemExit(0)
+
+  signal.signal(signal.SIGTERM, stop)
+  try:
+    server.serve_forever()
+  finally:
+    # Nobody counts as using a model once nothing is listening.
+    if os.path.exists(clients_path()):
+      os.unlink(clients_path())
+  return 0
+
+
 # ---------------------------------------------------------------- tailnet clients
 
 
@@ -3818,6 +4056,47 @@ def load_remotes():
     if isinstance(remote, dict) and remote.get("host") == name[:-5] and DNS_RE.match(str(remote.get("dns", ""))) and os.path.isfile(remote_key_path(name[:-5])):
       remotes[name[:-5]] = remote
   return remotes
+
+
+def connected(remote, rid):
+  """Whether this machine uses a paired host's model. A pairing made for one
+  model at a time lists the models it connects; one made whole (`pair <host>`)
+  connects all it shares but those it lists as disconnected."""
+  if not remote:
+    return False
+  if isinstance(remote.get("models"), list):
+    return rid in remote["models"]
+  return rid not in (remote.get("disconnected") or [])
+
+
+@contextlib.contextmanager
+def remotes_lock():
+  """Held across reading, changing and saving a pairing, so two pair or forget
+  commands at once can't undo each other."""
+  ensure_dir(remotes_dir(), 0o700)
+  with open(os.path.join(remotes_dir(), ".lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    yield
+
+
+def save_remote(remote):
+  write_atomic(os.path.join(remotes_dir(), f"{remote['host']}.json"), json.dumps(remote, indent=2) + "\n", mode=0o600)
+
+
+def unpair(host):
+  for path in (os.path.join(remotes_dir(), f"{host}.json"), remote_key_path(host)):
+    if os.path.exists(path):
+      os.unlink(path)
+
+
+def set_connected(remote, rid, on):
+  """Connect or disconnect one model of a pairing, in place. Returns False
+  when that leaves a one-at-a-time pairing with no model, which unpairs it."""
+  if isinstance(remote.get("models"), list):
+    remote["models"] = [m for m in remote["models"] if m != rid] + ([rid] if on else [])
+    return bool(remote["models"])
+  remote["disconnected"] = [m for m in remote.get("disconnected") or [] if m != rid] + ([] if on else [rid])
+  return True
 
 
 def network_path():
@@ -3942,8 +4221,12 @@ def survey_network(previous, now=None):
     state, listing, error = answers.get(host, ("offline", None, ""))
     if state == "online":
       hosts[host] = {"host": host, "dns": dns, "paired": paired, "state": "online", "error": "", "last_seen_ms": now, "ram_total_gib": listing["ram_total_gib"]}
+      # Only what its host runs, or is loading, is on offer: a model it stops
+      # leaves the list until it starts again.
       for model in listing["models"]:
-        record = remote_record(host, dns, model, paired, listing["ram_total_gib"], now)
+        if model["unit"] not in ("active", "activating"):
+          continue
+        record = remote_record(host, dns, model, connected(remotes.get(host), model["recipe"]), listing["ram_total_gib"], now)
         models[record["id"]] = record
       continue
     if state == "not_sharing" and not paired:
@@ -3959,7 +4242,7 @@ def survey_network(previous, now=None):
     reason = "offline" if state == "offline" else "unreachable"
     for mid, model in previous.get("models", {}).items():
       if isinstance(model, dict) and model.get("host") == host and isinstance(model.get("recipe"), str) and ID_RE.match(model["recipe"]):
-        models[mid] = {**model, "paired": paired, "offline": reason, "unit": "inactive", "since_ms": None}
+        models[mid] = {**model, "paired": connected(remotes.get(host), model["recipe"]), "offline": reason, "unit": "inactive", "since_ms": None}
   return {
     "schema": NETWORK_SCHEMA, "updated_ms": now, "tailnet": status is not None,
     # Whether `share` can work here: tailscale serve needs MagicDNS and HTTPS
@@ -3969,10 +4252,8 @@ def survey_network(previous, now=None):
   }
 
 
-def write_network(transitions=None, forget=None):
-  """Survey the tailnet and rewrite network.json, which the panel watches.
-  `transitions` marks a remote start or stop at once, before the host's
-  listing says so."""
+def write_network(forget=None):
+  """Survey the tailnet and rewrite network.json, which the panel watches."""
   ensure_dir(state_dir())
   with open(os.path.join(state_dir(), "network.lock"), "w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -3981,15 +4262,14 @@ def write_network(transitions=None, forget=None):
       previous["hosts"].pop(forget, None)
       previous["models"] = {mid: m for mid, m in previous["models"].items() if not (isinstance(m, dict) and m.get("host") == forget)}
     network = survey_network(previous)
-    now = int(time.time() * 1000)
-    for mid, unit in (transitions or {}).items():
-      model = network["models"].get(mid)
-      if model and not model["offline"]:
-        model["unit"] = unit
-        model["since_ms"] = now
-        model["error"] = ""
     write_atomic(network_path(), json.dumps(network, indent=2) + "\n")
-    return network
+  # Pairing, forgetting and every survey pass through here, so pi's extension
+  # follows paired hosts' models as status writes make it follow local ones.
+  try:
+    sync_pi_extension()
+  except OSError:
+    pass
+  return network
 
 
 def split_remote_id(value):
@@ -4003,8 +4283,8 @@ def resolve_remote(mid, running_only=True):
   """A paired host's model, as its host lists it right now."""
   host, rid = split_remote_id(mid)
   remote = load_remotes().get(host)
-  if not remote:
-    raise LocalError(f"{host} isn't paired. Run: omarchy agent local pair {host}")
+  if not connected(remote, rid):
+    raise LocalError(f"{host}/{rid} isn't paired. Run: omarchy agent local pair {host} {rid}")
   state, listing, error = fetch_listing(remote["dns"])
   if state != "online":
     raise LocalError(f"{host} doesn't share models right now" if state == "not_sharing" else f"{host} isn't reachable{': ' + error if error else ''}")
@@ -4016,37 +4296,88 @@ def resolve_remote(mid, running_only=True):
   raise LocalError(f"{host} doesn't share {rid}")
 
 
+def short_host(target):
+  """An SSH target as people call the machine: no user, no tailnet domain.
+  An address stays whole."""
+  host = target.rsplit("@", 1)[-1]
+  try:
+    ipaddress.ip_address(host)
+    return host
+  except ValueError:
+    return host.split(".")[0]
+
+
 def ssh_command(remote, *argv, interactive=False):
   target = remote.get("ssh") or remote["dns"]
   if not SSH_TARGET_RE.match(target):
     raise LocalError("Not an SSH target")
-  options = ["-o", "ConnectTimeout=10"] + ([] if interactive else ["-o", "BatchMode=yes"])
+  # A host met for the first time is trusted on sight, as the tailnet vouches
+  # for who it is; one whose key has changed since is still refused.
+  options = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"] + ([] if interactive else ["-o", "BatchMode=yes"])
   return ["ssh", *options, "--", target, shlex.join(["omarchy-agent-local", *argv])]
 
 
 def cmd_pair(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local pair", description="Use the models another machine on your tailnet shares")
   parser.add_argument("host", help="its tailnet name, or an SSH host that reaches it")
+  parser.add_argument("recipe", nargs="?", help="connect just this model; without one, every model it shares")
   args = parser.parse_args(argv)
   target = args.host
   if not SSH_TARGET_RE.match(target):
     raise LocalError("Not a host name")
+  if args.recipe is not None and not ID_RE.match(args.recipe):
+    raise LocalError("Not a recipe name")
+  # A host already paired has given its key: connecting another of its models
+  # needs no SSH.
+  if args.recipe:
+    with remotes_lock():
+      remote = next((r for r in load_remotes().values() if target in (r["host"], r["dns"], r.get("ssh"))), None)
+      if remote:
+        set_connected(remote, args.recipe, True)
+        save_remote(remote)
+    if remote:
+      write_network()
+      say(f"Paired with {remote['host']}/{args.recipe}")
+      return 0
   say(f"Pairing with {target} over SSH")
-  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=True), stdout=subprocess.PIPE, text=True)
+  # ssh exits 255 both when nothing answers and when sshd turns down every key
+  # offered, so its stderr tells the two apart. On a terminal a key's
+  # passphrase can be asked for there; without one (the agents panel pairs this
+  # way) nothing can answer a prompt, so ssh asks none.
+  result = subprocess.run(ssh_command({"ssh": target, "dns": ""}, "share", "--export", interactive=sys.stdin.isatty()), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+  sys.stderr.write(result.stderr)
+  # The agents panel shows an error's first line on the model's line, so that
+  # line names the machine short and fits there; the next says what to do.
+  name = short_host(target)
+  if result.returncode == 255 and "Permission denied" in result.stderr:
+    raise LocalError(f"{name} refused this machine's SSH keys\nStart the SSH agent that holds your key (like 1Password's), or authorize a key on {target} in Setup > Security")
+  if result.returncode == 255 and "Host key verification failed" in result.stderr:
+    # known_hosts keys a host by its name or address, never the login.
+    raise LocalError(f"{name}'s SSH host key has changed\nIf it was reinstalled, forget its old key with: ssh-keygen -R {target.rsplit('@', 1)[-1]}")
+  if result.returncode == 255:
+    raise LocalError(f"Can't reach {name} over SSH\nTurn on SSHD on {target} in Setup > Security")
   if result.returncode != 0:
-    raise LocalError(f"Can't reach omarchy-agent-local on {target} over SSH")
+    raise LocalError(f"Can't run omarchy-agent-local on {name}")
   try:
     export = json.loads(result.stdout.strip().splitlines()[-1])
     host, dns, key = export["host"], export["dns"], export["key"]
   except (ValueError, KeyError, IndexError, TypeError):
-    raise LocalError(f"{target} answered with something other than its sharing details")
+    raise LocalError(f"{name} didn't send its sharing details")
   if not HOST_RE.match(str(host)) or not DNS_RE.match(str(dns)) or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
-    raise LocalError(f"{target} answered with an invalid host name or key")
-  ensure_dir(remotes_dir(), 0o700)
-  write_atomic(remote_key_path(host), key, mode=0o600)
-  write_atomic(os.path.join(remotes_dir(), f"{host}.json"), json.dumps({"host": host, "dns": dns, "ssh": target, "paired_ms": int(time.time() * 1000)}, indent=2) + "\n", mode=0o600)
+    raise LocalError(f"{name} sent an invalid host name or key")
+  with remotes_lock():
+    write_atomic(remote_key_path(host), key, mode=0o600)
+    # The same host reached by another name keeps the models it connects.
+    remote = load_remotes().get(host) or {"models": []}
+    remote.update(host=host, dns=dns, ssh=target, paired_ms=int(time.time() * 1000))
+    if args.recipe:
+      set_connected(remote, args.recipe, True)
+    else:
+      remote.pop("models", None)
+      remote.pop("disconnected", None)
+    save_remote(remote)
   network = write_network()
-  shared = [m for m in network["models"].values() if m["host"] == host]
+  shared = [m for m in network["models"].values() if m["host"] == host and m["paired"]]
   if shared:
     say(f"Paired with {host}: " + ", ".join(m["recipe"] + ("" if m["offline"] else f" ({m['unit']})") for m in shared))
   else:
@@ -4055,37 +4386,31 @@ def cmd_pair(argv):
 
 
 def cmd_forget(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local forget", description="Unpair a host and drop its models from the panel")
-  parser.add_argument("host")
+  parser = argparse.ArgumentParser(prog="omarchy agent local forget", description="Unpair a host, or disconnect one of its models with host/recipe")
+  parser.add_argument("host", help="host, or host/recipe for just that model")
   args = parser.parse_args(argv)
   host = args.host
+  if "/" in host:
+    host, rid = split_remote_id(host)
+    with remotes_lock():
+      remote = load_remotes().get(host)
+      if not connected(remote, rid):
+        say(f"{host}/{rid} isn't paired")
+        return 0
+      # The last model disconnected unpairs the host, dropping its key.
+      if set_connected(remote, rid, False):
+        save_remote(remote)
+      else:
+        unpair(host)
+    write_network()
+    say(f"Disconnected {host}/{rid}")
+    return 0
   if not HOST_RE.match(host):
     raise LocalError("Not a host name")
-  for path in (os.path.join(remotes_dir(), f"{host}.json"), remote_key_path(host)):
-    if os.path.exists(path):
-      os.unlink(path)
+  with remotes_lock():
+    unpair(host)
   write_network(forget=host)
   say(f"Forgot {host}")
-  return 0
-
-
-def cmd_remote(argv):
-  parser = argparse.ArgumentParser(prog="omarchy agent local remote", description="Start or stop a model on a paired host")
-  parser.add_argument("action", choices=("start", "stop"))
-  parser.add_argument("model", help="host/recipe")
-  args = parser.parse_args(argv)
-  host, rid = split_remote_id(args.model)
-  remote = load_remotes().get(host)
-  if not remote:
-    raise LocalError(f"{host} isn't paired. Run: omarchy agent local pair {host}")
-  write_network({args.model: "activating" if args.action == "start" else "deactivating"})
-  try:
-    result = subprocess.run(ssh_command(remote, args.action, rid), capture_output=True, text=True)
-  finally:
-    write_network()
-  if result.returncode != 0:
-    raise LocalError((result.stderr.strip().splitlines() or [f"{args.action} failed on {host}"])[-1].removeprefix("Error: "))
-  say(f"{rid} {'started' if args.action == 'start' else 'stopped'} on {host}")
   return 0
 
 
@@ -4107,33 +4432,43 @@ def cmd_network(argv):
     say("No machine on your tailnet shares a model. On one that runs a model: omarchy agent local share <recipe>")
   for mid, model in sorted(network["models"].items()):
     state = model["offline"] or {"active": "running", "activating": "loading", "deactivating": "stopping"}.get(model["unit"], model["unit"])
-    pairing = "" if model["paired"] else f" · pair with: omarchy agent local pair {model['host']}"
+    pairing = "" if model["paired"] else f" · pair with: omarchy agent local pair {model['host']} {model['recipe']}"
     say(f"{mid} ({model['name']}): {state} · context {model['ctx']}{pairing}")
   return 0
 
 
-OVERLAY_PROVIDER = "llamacpp"
+# The provider local models are listed under, in pi's own extension and in the
+# launch overlays, so the two are one provider rather than two to pick from. A
+# paired host's models get their own, suffixed with the host.
+OVERLAY_PROVIDER = "omarchy-local"
 
 
 def overlay_target(rid=None):
   """The running model an overlay points at: a local recipe, or host/recipe
   on a paired machine of the tailnet."""
   if rid and "/" in rid:
-    model = resolve_remote(rid)
-    return {
-      "provider": f"{OVERLAY_PROVIDER}-{model['host']}",
-      "provider_name": f"Omarchy model on {model['host']}",
-      "base_url": model["endpoint"],
-      "key_path": remote_key_path(model["host"]),
-      "model": model["recipe"],
-      "name": model["name"],
-      "ctx": model["ctx"],
-      # A host that doesn't publish its cap yet gets the old default.
-      "max_tokens": model.get("max_tokens") or DEFAULT_MAX_OUTPUT_TOKENS,
-      "input": model["input"],
-      "file": f"{model['host']}--{model['recipe']}",
-    }
-  manifest = resolve_model(rid, running_only=True)
+    return remote_target(resolve_remote(rid))
+  return local_target(resolve_model(rid, running_only=True))
+
+
+def remote_target(model):
+  """A paired host's model, from its listing or network.json, as an overlay target."""
+  return {
+    "provider": f"{OVERLAY_PROVIDER}-{model['host']}",
+    "provider_name": f"Omarchy model on {model['host']}",
+    "base_url": model["endpoint"],
+    "key_path": remote_key_path(model["host"]),
+    "model": model["recipe"],
+    "name": model["name"],
+    "ctx": model["ctx"],
+    # A host that doesn't publish its cap yet gets the old default.
+    "max_tokens": model.get("max_tokens") or DEFAULT_MAX_OUTPUT_TOKENS,
+    "input": model["input"],
+    "file": f"{model['host']}--{model['recipe']}",
+  }
+
+
+def local_target(manifest):
   rid = manifest["recipe_id"]
   return {
     "provider": OVERLAY_PROVIDER,
@@ -4149,31 +4484,98 @@ def overlay_target(rid=None):
   }
 
 
-def pi_overlay(rid=None):
-  """A pi extension registering a running model, loaded only by local launches."""
-  target = overlay_target(rid)
-  provider = {
-    "name": target["provider_name"],
+def pi_model(target):
+  return {
+    "type": "chat",
+    "id": target["model"],
+    "name": target["name"],
     "baseUrl": target["base_url"],
-    "apiKey": "!cat -- " + shlex.quote(target["key_path"]),
-    "api": "openai-completions",
-    "models": [{
-      "type": "chat",
-      "id": target["model"],
-      "name": target["name"],
-      "reasoning": True,
-      "input": target["input"],
-      "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-      "contextWindow": target["ctx"],
-      "maxTokens": target["max_tokens"],
-    }],
+    "reasoning": True,
+    "input": target["input"],
+    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+    "contextWindow": target["ctx"],
+    "maxTokens": target["max_tokens"],
   }
-  source = (
-    "// Generated by omarchy-agent-local overlay for `omarchy agent --local`; rewritten on every launch.\n"
-    "export default function (pi) {\n"
-    f"  pi.registerProvider({json.dumps(target['provider'])}, {json.dumps(provider, indent=2)});\n"
-    "}\n"
-  )
+
+
+def pi_provider_source(header, targets):
+  """A pi extension registering these models, each at its own endpoint, under
+  their providers: this machine's, and one per paired host with its key."""
+  providers = {}
+  for target in targets:
+    providers.setdefault(target["provider"], {
+      "name": target["provider_name"],
+      "apiKey": "!cat -- " + shlex.quote(target["key_path"]),
+      "api": "openai-completions",
+      "models": [],
+    })["models"].append(pi_model(target))
+  registrations = "".join(f"  pi.registerProvider({json.dumps(name)}, {json.dumps(provider, indent=2)});\n" for name, provider in providers.items())
+  return f"// {header}\nexport default function (pi) {{\n{registrations}}}\n"
+
+
+def local_targets():
+  """Every model set up here as an overlay target. A manifest that can't be
+  read as one is left out rather than costing the others their line."""
+  targets = []
+  for rid in known_models():
+    try:
+      targets.append(local_target(load_model(rid)))
+    except (KeyError, TypeError, AttributeError):
+      pass
+  return targets
+
+
+def remote_targets():
+  """Every paired host's connected model this machine has seen, as overlay
+  targets, whether or not its host answers right now: like a stopped local
+  model, it keeps its place in the picker."""
+  remotes = load_remotes()
+  targets = []
+  for model in load_network()["models"].values():
+    try:
+      if model.get("paired") and model["host"] in remotes:
+        targets.append(remote_target(model))
+    except (KeyError, TypeError, AttributeError):
+      pass
+  return sorted(targets, key=lambda target: (target["provider"], target["model"]))
+
+
+def pi_extension_path():
+  return os.path.join(home(), ".pi", "agent", "extensions", "omarchy-local.ts")
+
+
+def sync_pi_extension():
+  """Keep pi's own extension listing every model set up here and every paired
+  host's, so plain `pi`, its /model picker and a default of
+  omarchy-local/<recipe> or omarchy-local-<host>/<recipe> reach each one at
+  its current endpoint with the current key, with nothing written by hand.
+  Only where pi has made its folder; it goes when the last model does."""
+  if not os.path.isdir(os.path.join(home(), ".pi", "agent")):
+    return
+  # Status and network writes both sync, so collecting and writing hold a
+  # lock of their own: an older list can't land over a newer one.
+  ensure_dir(state_dir())
+  with open(os.path.join(state_dir(), "pi.lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    path = pi_extension_path()
+    targets = local_targets() + remote_targets()
+    if not targets:
+      if os.path.exists(path):
+        os.unlink(path)
+      return
+    source = pi_provider_source("Generated by omarchy-agent-local for every model set up here or paired on the tailnet; rewritten as they change.", targets)
+    if _read(path) != source.strip():
+      write_atomic(path, source)
+
+
+def pi_overlay(rid=None):
+  """A pi extension for a launch on a running model. It lists the rest of its
+  provider's models too, as pi's own extension does, so loading it over that
+  one leaves the /model picker whole; the launch picks this one with --model."""
+  target = overlay_target(rid)
+  siblings = local_targets() if target["provider"] == OVERLAY_PROVIDER else remote_targets()
+  targets = [target] + [other for other in siblings if other["provider"] == target["provider"] and other["model"] != target["model"]]
+  source = pi_provider_source("Generated by omarchy-agent-local overlay for `omarchy agent --local`; rewritten on every launch.", targets)
   # One file per model: launches of two models close together must not
   # swap each other's overlay before their agents read it.
   path = os.path.join(config_dir(), "overlays", f"pi-{target['file']}.ts")
@@ -4229,12 +4631,33 @@ def opencode_overlay(rid=None):
   return path, target["provider"], target["model"]
 
 
+def qwen_overlay(rid=None):
+  """What Qwen Code is launched with: it takes an OpenAI-compatible endpoint
+  from flags and its key from the environment, so this is the endpoint, the
+  model and where the key is, for the launcher to read. No key in it."""
+  target = overlay_target(rid)
+  overlay = {
+    "baseUrl": target["base_url"],
+    "model": target["model"],
+    "name": target["name"],
+    "keyFile": target["key_path"],
+    "contextWindow": target["ctx"],
+    "maxTokens": target["max_tokens"],
+  }
+  path = os.path.join(config_dir(), "overlays", f"qwen-{target['file']}.json")
+  write_atomic(path, json.dumps(overlay, indent=2) + "\n")
+  return path, target["provider"], target["model"]
+
+
+OVERLAYS = {"pi": lambda rid: pi_overlay(rid), "opencode": lambda rid: opencode_overlay(rid), "qwen": lambda rid: qwen_overlay(rid)}
+
+
 def cmd_overlay(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local overlay")
-  parser.add_argument("agent", choices=("opencode", "pi"))
+  parser.add_argument("agent", choices=tuple(OVERLAYS))
   parser.add_argument("recipe", nargs="?", help="the running model, or host/recipe on a paired machine (default: the last one started here)")
   args = parser.parse_args(argv)
-  for line in (pi_overlay if args.agent == "pi" else opencode_overlay)(args.recipe):
+  for line in OVERLAYS[args.agent](args.recipe):
     print(line)
   return 0
 
@@ -4282,7 +4705,6 @@ COMMANDS = {
   "network": cmd_network,
   "pair": cmd_pair,
   "forget": cmd_forget,
-  "remote": cmd_remote,
   "logs": cmd_logs,
   # Plumbing for the panel, omarchy agent, omarchy update and catalog
   # maintainers; they run but aren't listed.
@@ -4292,6 +4714,7 @@ COMMANDS = {
   "overlay": cmd_overlay,
   "link": cmd_link,
   "link-worker": cmd_link_worker,
+  "share-proxy": cmd_share_proxy,
 }
 
 SUMMARIES = {
@@ -4305,7 +4728,6 @@ SUMMARIES = {
   "network": "List the models shared on your tailnet, including hosts that are offline",
   "pair": "Pair with a machine over SSH to use the models it shares",
   "forget": "Unpair a machine and drop its models",
-  "remote": "Start or stop a model on a paired machine: remote start host/recipe",
   "logs": "Show a model's logs, and its other half's on a paired Spark",
   "link": "Show the Spark cabled to this one; 'link setup <peer>' prepares both",
 }
@@ -4329,7 +4751,12 @@ def main(argv):
   try:
     return COMMANDS[command](argv)
   except LocalError as error:
-    print(f"Error: {error}", file=sys.stderr)
+    # On a terminal the error ends output from ssh, podman and the like, so it
+    # gets a line of space and a red label to stand apart from it.
+    if sys.stderr.isatty():
+      print(f"\n\033[1;31mError:\033[0m {error}", file=sys.stderr)
+    else:
+      print(f"Error: {error}", file=sys.stderr)
     return 1
   except KeyboardInterrupt:
     return 130
