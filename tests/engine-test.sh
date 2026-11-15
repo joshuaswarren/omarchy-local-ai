@@ -67,6 +67,12 @@ recipe = {"name": "Test model", "summary": "Fixture", "runtime": "server",
 gpu = {"vendor": "amd", "family": "amd-strix-halo", "memory_gib": 48}
 profile = {"platform": "x86", "ram_class": 64, "ram_gib": 64, "gpus": [gpu]}
 entry = {"gpu": gpu["family"], "ram_class": 64, "recipes": ["model"]}
+
+def marker_written_into_existing():
+  with patch.object(a, "validate_files"), patch.object(a.os.path, "isdir", return_value=True), patch.object(a, "write_marker") as w:
+    a.materialize("model", [], {})
+    return w.called
+
 check("valid recipe and runtime fixtures are accepted", not a.validate_runtime("server", runtime) and not a.validate_recipe("model", recipe, {"server": runtime}))
 
 for rid in ("..", "a..b", "-a", "a-", ".a", "a."):
@@ -344,6 +350,10 @@ pair_port = a.port_for("paired")
 check("the pair unit shares the host network and publishes nothing", "Network=host" in pair_text and "PublishPort" not in pair_text)
 check("the pair unit binds its API to loopback on the model's port", f'"--host" "127.0.0.1" "--port" "{pair_port}"' in pair_text and f"127.0.0.1:{pair_port}/health" in pair_text)
 check("the pair unit mounts rank 0's state folder writable and reads the link from its environment file", f"models/paired/{'b' * 16}.rank0:/state\n" in pair_text and "EnvironmentFile=%h/.local/state/omarchy/agent-local/pair/paired.env" in pair_text)
+check("both units refuse to start until the weights marker exists",
+  f"ExecStartPre=/usr/bin/env test -f %h/.local/share/omarchy/agent-local/models/model/{'a' * 16}/.complete" in text
+  and f"ExecStartPre=/usr/bin/env test -f %h/.local/share/omarchy/agent-local/models/paired/{'b' * 16}/.complete" in pair_text)
+check("materialize writes the marker into an existing fileset too", marker_written_into_existing())
 check("the pair unit starts and stops rank 1 with itself", "ExecStartPre=/usr/bin/env omarchy-agent-local link-worker start paired" in pair_text and "ExecStopPost=-/usr/bin/env omarchy-agent-local link-worker stop paired" in pair_text)
 _, rank_argv, _, _ = a.head_argv(pair_rt, paired, paired["variant"][0], {"model": "model"}, "paired")
 check("both ranks run the runtime's command, bound to loopback", rank_argv[-4:] == ["--host", "127.0.0.1", "--port", str(a.port_for("paired"))] and rank_argv[:2] == ["server", "serve"])
