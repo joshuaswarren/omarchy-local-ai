@@ -4185,7 +4185,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 16384
 
 
 def max_output_tokens(manifest):
-  """The reply cap the server enforces, so agents never ask for less (or more) than it allows."""
+  """The reply cap the server enforces, so agents never ask for less (or more) than it allows; at most half the window, so a prompt fits."""
   args = manifest["recipe"].get("server", {}).get("args", []) + manifest["variant"].get("args", [])
   value = None
   for index, arg in enumerate(args):
@@ -4199,7 +4199,7 @@ def max_output_tokens(manifest):
     tokens = DEFAULT_MAX_OUTPUT_TOKENS
   if tokens <= 0:
     tokens = DEFAULT_MAX_OUTPUT_TOKENS
-  return min(tokens, manifest["variant"]["ctx"])
+  return min(tokens, manifest["variant"]["ctx"] // 2)
 
 
 def model_inputs(manifest):
