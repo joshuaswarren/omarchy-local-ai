@@ -10,8 +10,8 @@ checked = [
   "license: TensorFold is Apache-2.0 (the LICENSE at b8b634101 equals the 1.2.1 release's); its LICENSE, NOTICE and THIRD_PARTY_NOTICES.md ship in /usr/share/licenses/tensorfold; the Vulkan driver and the Arch Linux ARM packages keep their own notices",
   "build: GitHub Actions on an arm64 runner, image commit d07a55f, `zig build native-vulkan -Dvulkan=true -Dtarget=aarch64-linux-gnu -Dcpu=apple_m1` with zig 0.17.0 checked against its SHA-256; the root filesystem holds glibc, gcc-libs, bash, coreutils, curl and the Vulkan loader and driver, and tensorfold-native links only libc and opens Vulkan at run time",
   "behavior: the Vulkan backend serves one Qwen3.5 2B dense checkpoint (MLX affine 4-bit, group 64), one stream, greedy only, and refuses a --context above 7168 and a request temperature above 0",
-  "auth (checked on the previous image, b14adaf2; the b8b634101 image is checked in the next commit): the key covers /v1/models and /v1/chat/completions (2026-11-15 on a 96 GB M2 Max: /v1/models returned 401 without the key and 200 with it)",
-  "acceptance (previous image b14adaf2; 2026-11-15, 96 GB M2 Max, through omarchy-local-ai): loaded in 4.0 s; an agent-shaped request (2901-token prompt, no temperature, the recipe's 2048-token cap) returned 200 with finish_reason length; temperature 0.7 returned 400 with \"this engine decodes greedily only\"",
+  "auth (2026-11-15 on a 96 GB M2 Max, through omarchy-local-ai, this image): the key covers /v1/models and /v1/chat/completions (/v1/models returned 401 without the key and 200 with it)",
+  "acceptance (2026-11-15, 96 GB M2 Max, through omarchy-local-ai, this image): loaded in 3.0 s; an agent-shaped request (2901-token prompt, no temperature, the recipe's 2048-token cap) returned 200 with finish_reason length; temperature 0.7 returned 400 with \"this engine decodes greedily only\"",
   "caveat: /health answers without the key",
   "caveat: the window is 7168 tokens; a prompt plus max_tokens above it is refused",
 ]
