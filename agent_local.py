@@ -1828,6 +1828,28 @@ def http_status(url, key=None, timeout=10, data=None):
     return 0, str(error).encode()
 
 
+def served_a_token(body):
+  """True when a streamed reply carries text in a delta or a completion count of 1 or more.
+  An empty finish delta and `"usage": null` are on every stream, so only values count."""
+  for line in body.decode("utf-8", "replace").splitlines():
+    if not line.startswith("data:") or line.strip() == "data: [DONE]":
+      continue
+    try:
+      chunk = json.loads(line[len("data:"):])
+    except ValueError:
+      continue
+    if not isinstance(chunk, dict):
+      continue
+    for choice in chunk.get("choices") or []:
+      delta = choice.get("delta") if isinstance(choice, dict) else None
+      if isinstance(delta, dict) and (delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning")):
+        return True
+    usage = chunk.get("usage")
+    if isinstance(usage, dict) and (usage.get("completion_tokens") or 0) >= 1:
+      return True
+  return False
+
+
 def post_start_checks(rid, key):
   base = f"{endpoint(rid)}/models"
   status, _ = http_status(base)
@@ -1853,7 +1875,7 @@ def post_start_checks(rid, key):
     "temperature": 0,
     "stream": True,
   }).encode())
-  if status != 200 or not (b'"delta"' in body or b'"usage"' in body):
+  if status != 200 or not served_a_token(body):
     detail = "returned no token" if status == 200 else f"failed (HTTP {status or 'no answer'})"
     raise LocalError(f"The model loaded but its first generation {detail}; refusing a start that hasn't served one token",
                      short="First generation failed")

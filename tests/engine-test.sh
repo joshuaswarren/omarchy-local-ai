@@ -546,6 +546,17 @@ class FakeModel(BaseHTTPRequestHandler):
       self._json(500, {"error": "embed_token failed"})
     elif FakeModel.generation == "empty":
       self._json(200, {"choices": [{"message": {}}]})
+    elif FakeModel.generation in ("finish-only", "usage-null"):
+      # Servers send an empty delta on the finish chunk and "usage": null on every chunk.
+      text = ('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+              if FakeModel.generation == "finish-only" else
+              'data: {"choices":[{"delta":{"role":"assistant"}}],"usage":null}\n\ndata: [DONE]\n\n')
+      body = text.encode()
+      self.send_response(200)
+      self.send_header("Content-Type", "text/event-stream")
+      self.send_header("Content-Length", str(len(body)))
+      self.end_headers()
+      self.wfile.write(body)
     else:
       text = ('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
               'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\ndata: [DONE]\n\n')
@@ -579,6 +590,13 @@ try:
          lambda: a.post_start_checks("gencheck", "genkey"), "generation")
 finally:
   stop_fake(server)
+for generation, label in (("finish-only", "an empty finish chunk"), ("usage-null", "a null usage field")):
+  server = fake_model_server(generation)
+  try:
+    raises(f"a start refuses a first generation that sends only {label}",
+           lambda: a.post_start_checks("gencheck", "genkey"), "generation")
+  finally:
+    stop_fake(server)
 server = fake_model_server(None)
 try:
   a.post_start_checks("gencheck", "genkey")
