@@ -511,6 +511,84 @@ with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" 
 with patch.object(a, "unit_props", return_value={"InactiveExitTimestamp": "@%d" % int(__import__("time").time() + 60)}), patch.object(a, "journal_tail", return_value="nothing useful"):
   check("an older reason gives way, and with no server error systemd's result is shown", a.failure_reason("crashy", "exit-code") == "Stopped unexpectedly (exit-code)")
 a.clear_error("crashy")
+
+# Post-start checks must prove a generation, not just a guarded listing (minefield 112, 116):
+# liveness answers and a model list say nothing about the first forward. A fake server here
+# serves the listing exactly as the contract demands and fails the first generation.
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class FakeModel(BaseHTTPRequestHandler):
+  generation = None  # None: a real one-token SSE stream; "500": an error; "empty": 200, no tokens
+  def log_message(self, *args):
+    pass
+  def _json(self, code, payload):
+    body = json.dumps(payload).encode()
+    self.send_response(code)
+    self.send_header("Content-Type", "application/json")
+    self.send_header("Content-Length", str(len(body)))
+    self.end_headers()
+    self.wfile.write(body)
+  def do_GET(self):
+    if self.path == "/v1/models":
+      if self.headers.get("Authorization") != "Bearer genkey":
+        self._json(401, {"error": "no key"})
+      else:
+        self._json(200, {"data": [{"id": "gencheck"}]})
+    else:
+      self._json(404, {})
+  def do_POST(self):
+    if self.path != "/v1/chat/completions":
+      self._json(404, {})
+    elif self.headers.get("Authorization") != "Bearer genkey":
+      self._json(401, {"error": "no key"})
+    elif FakeModel.generation == "500":
+      self._json(500, {"error": "embed_token failed"})
+    elif FakeModel.generation == "empty":
+      self._json(200, {"choices": [{"message": {}}]})
+    else:
+      text = ('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+              'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\ndata: [DONE]\n\n')
+      body = text.encode()
+      self.send_response(200)
+      self.send_header("Content-Type", "text/event-stream")
+      self.send_header("Content-Length", str(len(body)))
+      self.end_headers()
+      self.wfile.write(body)
+
+def fake_model_server(generation):
+  server = ThreadingHTTPServer(("127.0.0.1", 0), FakeModel)
+  threading.Thread(target=server.serve_forever, daemon=True).start()
+  FakeModel.generation = generation
+  # The check reads the endpoint from ports.json; serve the fake on that port.
+  port = a.port_for("gencheck")
+  server.socket.close()
+  bound = ThreadingHTTPServer(("127.0.0.1", port), FakeModel)
+  server.shutdown()
+  threading.Thread(target=bound.serve_forever, daemon=True).start()
+  return bound
+
+a.write_atomic(a.model_manifest_path("gencheck"), json.dumps({"recipe_id": "gencheck"}))
+server = fake_model_server("500")
+try:
+  raises("a start refuses a model whose listing is right but first generation fails",
+         lambda: a.post_start_checks("gencheck", "genkey"), "generation")
+finally:
+  server.shutdown()
+server = fake_model_server("empty")
+try:
+  raises("a start refuses a first generation that returns no token",
+         lambda: a.post_start_checks("gencheck", "genkey"), "generation")
+finally:
+  server.shutdown()
+server = fake_model_server(None)
+try:
+  a.post_start_checks("gencheck", "genkey")
+  check("a model that serves one token passes the start checks", True)
+finally:
+  server.shutdown()
+os.unlink(a.model_manifest_path("gencheck"))
+
 # logs prints the last error, the model's journal and, for a pair, rank 1's log from the peer.
 a.record_error("crashy", "Locked memory limited: run link setup")
 a.write_atomic(a.model_manifest_path("crashy"), json.dumps({"recipe_id": "crashy", "pair": {"peer": "10.99.1.2", "host": "spark2", "home": "/home/u"}}))
