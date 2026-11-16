@@ -831,6 +831,33 @@ check("a peer's listing keeps only known states and measurements", clean["models
 check("a peer's listing keeps a known architecture and drops any other", clean["models"][0]["architecture"] == "moe" and clean["models"][1]["architecture"] == "")
 check("a peer's reply cap is kept within its context, and a missing one is the default",
       clean["models"][0]["max_tokens"] == 262144 and clean["models"][1]["max_tokens"] == a.DEFAULT_MAX_OUTPUT_TOKENS)
+
+# The speeds a card publishes carry the machine and prompt depth behind them
+# (minefield 35, 55): a class orders its recipes from measurements taken on
+# different machines and sessions, and a claimed context is only as good as
+# the depth actually exercised.
+measured_root = Path(os.environ["HOME"])
+(measured_root / "measurements").mkdir(exist_ok=True)
+(measured_root / "measurements" / "model.toml").write_text(
+  'recipe = "model"\nmeasured_at = "2026-11-10"\n\n[machine]\nsystem = "NVIDIA NVIDIA_DGX_Spark"\nkernel = "7.3.0-41-omarchy"\ngpu_driver = "615.78.08"\n\n[long]\nprompt_tokens = 30225\ndecode_tok_s = 35.1\n')
+prov_catalog = SimpleNamespace(root=str(measured_root), version="t",
+                               recipes={"model": recipe, "unmeasured": dict(recipe, id="unmeasured")},
+                               runtimes={"server": runtime}, best={"class": [entry]})
+rows = {row["id"]: row for row in a.recipe_listing(prov_catalog, profile, ())}
+measured = rows["model"]["measured"]
+check("a card's speeds carry the machine they were measured on",
+      measured["system"] == "NVIDIA NVIDIA_DGX_Spark" and measured["kernel"] == "7.3.0-41-omarchy" and measured["gpu_driver"] == "615.78.08" and measured["at"] == "2026-11-10")
+check("a card names the prompt depth its context was exercised to", measured["prompt_tokens"] == 30225)
+check("a card without a measurement names none", rows["unmeasured"]["measured"] is None)
+dirty = {"schema": 1, "host": "box", "dns": "box.tail.ts.net", "ram_total_gib": 100.0, "models": [
+  {"recipe": "big-model", "name": "x", "ctx": 4096, "decode_tok_s": 40, "unit": "active",
+   "measured": {"at": "2026-11-10", "system": "NVIDIA NVIDIA_DGX_Spark", "kernel": "7.3.0-41-omarchy", "gpu_driver": "615.78.08", "prompt_tokens": 30225, "evil": {"deep": True}}},
+  {"recipe": "odd-state", "unit": "inactive", "measured": "not a table"},
+]}
+clean_measured = a.clean_listing(dirty, "box.tail.ts.net")["models"]
+check("a peer's measurement block survives cleaning without its extras",
+      clean_measured[0]["measured"]["kernel"] == "7.3.0-41-omarchy" and clean_measured[0]["measured"]["prompt_tokens"] == 30225 and "evil" not in clean_measured[0]["measured"])
+check("a peer's malformed measurement block cleans to none", clean_measured[1]["measured"] is None)
 raises("a listing of another schema is refused", lambda: a.clean_listing({"schema": 2, "models": []}, "box"), "Not an Omarchy")
 check("a number too big for a float is no number", a._number(10 ** 400) is None)
 class Huge:
