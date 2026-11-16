@@ -89,10 +89,37 @@ def toml_dumps(data, prefix=""):
 
 
 BENCH_SHORT = "Write a bash function that prints the 20 largest files under a directory, human-readable sizes, handling spaces in names. Just the code."
+# Runs per long prompt and edit: one decode number is one draw of a speculative
+# lane's acceptance (minefield 54, 111), so the record carries the spread.
+REPEATS = 3
 BENCH_LONG_QUESTION = "Above are shell scripts from a Linux desktop project. Pick the one with the most fragile error handling, name it, and rewrite its worst function to be robust. Show the code."
 # An agent's everyday edit: the reply is mostly a copy of the file, which is
 # where speculative decoding and prompt lookup pay off.
 BENCH_EDIT_QUESTION = "Rename the function `ensure_dir` to `make_dir` everywhere in the file above. Reply with the complete updated file and nothing else."
+
+
+def summarize_runs(runs):
+  """One bare number is one draw (minefield 54, 111): the median publishes,
+  with every run's decode and the range beside it, so two suites of the same
+  config can be told apart from resampled content. A run without a decode
+  count is skipped, not scored as zero."""
+  decodes = sorted(run["decode_tok_s"] for run in runs if run.get("decode_tok_s") is not None)
+  if not decodes:
+    return {"decode_tok_s": None}
+  return {
+    "decode_tok_s": round(decodes[len(decodes) // 2] if len(decodes) % 2 else (decodes[len(decodes) // 2 - 1] + decodes[len(decodes) // 2]) / 2, 1),
+    "decode_tok_s_runs": decodes,
+    "decode_tok_s_range": [decodes[0], decodes[-1]],
+  }
+
+
+def median_run(runs):
+  """The run at the median decode: the one whose ttft, prefill and token counts
+  the record publishes beside the summarized decode."""
+  usable = [run for run in runs if run.get("decode_tok_s") is not None]
+  if not usable:
+    return {"decode_tok_s": None}
+  return sorted(usable, key=lambda run: run["decode_tok_s"])[len(usable) // 2]
 
 
 def bench_request(prompt, model, key, max_tokens=512):
@@ -144,8 +171,10 @@ def bench_request(prompt, model, key, max_tokens=512):
 def cmd_bench(argv):
   parser = argparse.ArgumentParser(prog="tools/bench")
   parser.add_argument("recipe", nargs="?", help="the running model (default: the last one started)")
+  parser.add_argument("--repeats", type=int, default=REPEATS, help="runs per long prompt and edit, summarized as a median with its range")
   parser.add_argument("--output", help="write the measurement record here (default: print it)")
   args = parser.parse_args(argv)
+  repeats = max(1, args.repeats)
   active = resolve_model(args.recipe, running_only=True)
   corpus = os.path.join(ROOT, "bench", "context.txt")
   if not os.path.isfile(corpus):
@@ -167,16 +196,20 @@ def cmd_bench(argv):
   sampler = threading.Thread(target=sample, daemon=True)
   sampler.start()
   try:
-    say(f"Benchmarking {rid}: short prompt, ~32K-token prompt and a code edit (greedy, thinking off, 512 tokens out)")
+    say(f"Benchmarking {rid}: short prompt, ~32K-token prompt and a code edit, {repeats} runs each (greedy, thinking off, 512 tokens out)")
     bench_request("Say ok.", rid, key, max_tokens=8)
     short = bench_request(BENCH_SHORT, rid, key)
     say(f"  short: decode {short['decode_tok_s']} tok/s, first token {short['ttft_s']}s")
-    long = bench_request(context + "\n\n" + BENCH_LONG_QUESTION, rid, key)
-    say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s")
+    long_prompt = context + "\n\n" + BENCH_LONG_QUESTION
+    long_runs = [bench_request(long_prompt, rid, key) for _ in range(repeats)]
+    long = {**median_run(long_runs), **summarize_runs(long_runs)}
+    say(f"  long ({long['prompt_tokens']} tokens): first token {long['ttft_s']}s, prefill {long['prefill_tok_s']} tok/s, decode {long['decode_tok_s']} tok/s ({long['decode_tok_s_range'][0]}-{long['decode_tok_s_range'][1]} over {repeats})")
     with open(os.path.join(ROOT, "bench", "edit.py.txt"), encoding="utf-8") as handle:
       code = handle.read()
-    edit = bench_request("```python\n" + code + "```\n\n" + BENCH_EDIT_QUESTION, rid, key)
-    say(f"  edit ({edit['prompt_tokens']} tokens): decode {edit['decode_tok_s']} tok/s")
+    edit_prompt = "```python\n" + code + "```\n\n" + BENCH_EDIT_QUESTION
+    edit_runs = [bench_request(edit_prompt, rid, key) for _ in range(repeats)]
+    edit = {**median_run(edit_runs), **summarize_runs(edit_runs)}
+    say(f"  edit ({edit['prompt_tokens']} tokens): decode {edit['decode_tok_s']} tok/s ({edit['decode_tok_s_range'][0]}-{edit['decode_tok_s_range'][1]} over {repeats})")
   finally:
     stop.set()
     sampler.join()
@@ -213,7 +246,7 @@ def cmd_bench(argv):
     "short": short,
     "long": long,
     "edit": edit,
-    "method": "tools/bench: 1 warmup, then a short prompt, a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, temperature 0, enable_thinking false, 512 tokens out, streamed",
+    "method": "tools/bench: 1 warmup, then a short prompt, then 3 runs each of a ~32K-token prompt from bench/context.txt and a code-copying edit of bench/edit.py.txt, published as the median with decode_tok_s_runs and decode_tok_s_range beside it, temperature 0, enable_thinking false, 512 tokens out, streamed",
   }
   text = toml_dumps(record)
   if args.output:
