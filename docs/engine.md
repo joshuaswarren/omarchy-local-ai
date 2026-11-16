@@ -106,7 +106,9 @@ saved with `unchecked = true`. Its first plain `start [recipe]` performs the
 post-start authentication and model-ID checks; failure stops it and retains the
 flag for a retry. Autostart cannot be enabled before that first checked start.
 `start` defaults to the last started model; `stop [recipe]` defaults to all running
-models.
+models. A stop systemd cannot finish raises instead of reporting success: the old
+server would keep its port and its memory while the panel and admission count
+them free.
 
 `remove <recipe>` stops it, removes its unit and file sets, drops blobs unused by
 other recipes and removes its image only if no surviving current manifest uses
