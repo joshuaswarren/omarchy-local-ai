@@ -557,16 +557,14 @@ class FakeModel(BaseHTTPRequestHandler):
       self.wfile.write(body)
 
 def fake_model_server(generation):
-  server = ThreadingHTTPServer(("127.0.0.1", 0), FakeModel)
-  threading.Thread(target=server.serve_forever, daemon=True).start()
   FakeModel.generation = generation
-  # The check reads the endpoint from ports.json; serve the fake on that port.
-  port = a.port_for("gencheck")
-  server.socket.close()
-  bound = ThreadingHTTPServer(("127.0.0.1", port), FakeModel)
+  server = ThreadingHTTPServer(("127.0.0.1", a.port_for("gencheck")), FakeModel)
+  threading.Thread(target=server.serve_forever, daemon=True).start()
+  return server
+
+def stop_fake(server):
   server.shutdown()
-  threading.Thread(target=bound.serve_forever, daemon=True).start()
-  return bound
+  server.server_close()
 
 a.write_atomic(a.model_manifest_path("gencheck"), json.dumps({"recipe_id": "gencheck"}))
 server = fake_model_server("500")
@@ -574,19 +572,19 @@ try:
   raises("a start refuses a model whose listing is right but first generation fails",
          lambda: a.post_start_checks("gencheck", "genkey"), "generation")
 finally:
-  server.shutdown()
+  stop_fake(server)
 server = fake_model_server("empty")
 try:
   raises("a start refuses a first generation that returns no token",
          lambda: a.post_start_checks("gencheck", "genkey"), "generation")
 finally:
-  server.shutdown()
+  stop_fake(server)
 server = fake_model_server(None)
 try:
   a.post_start_checks("gencheck", "genkey")
   check("a model that serves one token passes the start checks", True)
 finally:
-  server.shutdown()
+  stop_fake(server)
 os.unlink(a.model_manifest_path("gencheck"))
 
 # logs prints the last error, the model's journal and, for a pair, rank 1's log from the peer.
@@ -730,11 +728,11 @@ with patch.object(a, "load_catalog", return_value=cat), patch.object(a, "machine
   check("memory-busy first setup succeeds without activation", a.cmd_use([rid]) == 0 and a.load_model(rid)["unchecked"])
 for response, succeeds in (([(200, b"")], False),
                            ([(401, b""), (200, b'{"data":[{"id":"other"}]}')], False),
-                           ([(401, b""), (200, json.dumps({"data": [{"id": rid}]}).encode())], True)):
+                           ([(401, b""), (200, json.dumps({"data": [{"id": rid}]}).encode()), (200, b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n')], True)):
   with patch.object(a, "unit_active", return_value=False), patch.object(a, "write_status"), patch.object(a, "evict_idle_weights"), patch.object(a, "check_headroom", return_value=(100.0, 90.0)), patch.object(a, "free_memory", return_value=(52.0, 64.0)), patch.object(a, "ensure_key", return_value="test-key"), patch.object(a, "http_status", side_effect=response) as http, patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0)) as systemctl:
     if succeeds:
       a._start(SimpleNamespace(recipe=rid), cat, profile)
-      check("first checked start clears the unchecked flag", not a.load_model(rid).get("unchecked") and http.call_count == 2)
+      check("first checked start clears the unchecked flag", not a.load_model(rid).get("unchecked") and http.call_count == 3)
       check("a start records the memory the model took", a.load_model(rid)["observed"]["ram_used_gib"] == 48.0)
     else:
       raises("first start refuses failed authentication or wrong model ID", lambda: a._start(SimpleNamespace(recipe=rid), cat, profile))
