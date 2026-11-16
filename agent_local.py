@@ -1813,17 +1813,41 @@ def pair_limits(peer):
 HTTP_MAX_BYTES = 1 << 20
 
 
-def http_status(url, key=None, timeout=10):
+def http_status(url, key=None, timeout=10, data=None):
   headers = {"User-Agent": "omarchy-agent-local"}
   if key:
     headers["Authorization"] = f"Bearer {key}"
+  if data:
+    headers["Content-Type"] = "application/json"
   try:
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as response:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers, data=data), timeout=timeout) as response:
       return response.status, response.read(HTTP_MAX_BYTES)
   except urllib.error.HTTPError as error:
     return error.code, b""
   except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
     return 0, str(error).encode()
+
+
+def served_a_token(body):
+  """True when a streamed reply carries text in a delta or a completion count of 1 or more.
+  An empty finish delta and `"usage": null` are on every stream, so only values count."""
+  for line in body.decode("utf-8", "replace").splitlines():
+    if not line.startswith("data:") or line.strip() == "data: [DONE]":
+      continue
+    try:
+      chunk = json.loads(line[len("data:"):])
+    except ValueError:
+      continue
+    if not isinstance(chunk, dict):
+      continue
+    for choice in chunk.get("choices") or []:
+      delta = choice.get("delta") if isinstance(choice, dict) else None
+      if isinstance(delta, dict) and (delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning")):
+        return True
+    usage = chunk.get("usage")
+    if isinstance(usage, dict) and (usage.get("completion_tokens") or 0) >= 1:
+      return True
+  return False
 
 
 def post_start_checks(rid, key):
@@ -1840,6 +1864,21 @@ def post_start_checks(rid, key):
     ids = []
   if rid not in ids:
     raise LocalError(f"Port {port_for(rid)} is serving {', '.join(map(str, ids)) or 'an unknown model'}, not {rid}")
+  # Liveness and a guarded listing are not readiness (minefield 112), and a load
+  # that reports success has not run its first forward (minefield 116): the two
+  # lies only a generation catches. One streamed token; content may sit in the
+  # reasoning channel, so any delta or a usage block is proof enough.
+  status, body = http_status(f"{endpoint(rid)}/chat/completions", key, timeout=180, data=json.dumps({
+    "model": rid,
+    "messages": [{"role": "user", "content": "Say ok."}],
+    "max_tokens": 1,
+    "temperature": 0,
+    "stream": True,
+  }).encode())
+  if status != 200 or not served_a_token(body):
+    detail = "returned no token" if status == 200 else f"failed (HTTP {status or 'no answer'})"
+    raise LocalError(f"The model loaded but its first generation {detail}; refusing a start that hasn't served one token",
+                     short="First generation failed")
 
 
 def free_memory(gpu):

@@ -31,7 +31,9 @@ The host key is mode 0600 and passed as a Podman secret, never embedded in a uni
 Runtimes taking a key argument must explicitly opt in and use the engine's Bash
 substitution inside the container; installation warns that local process listings
 can expose it. Post-start checks require `/v1/models` to reject an unauthenticated
-request, accept the key and advertise the recipe ID. A failed activation stops
+request, accept the key and advertise the recipe ID, and a one-token generation to
+serve at least one delta or a usage block: a load that reports success has not run
+its first forward, and a guarded listing is not readiness. A failed activation stops
 the new unit and restores that recipe's previous unit and running state.
 
 Quadlet generation uses typed fields and escapes systemd substitutions, quotes
