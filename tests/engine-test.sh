@@ -841,7 +841,7 @@ measured_root = Path(os.environ["HOME"])
 (measured_root / "measurements" / "model.toml").write_text(
   'recipe = "model"\nmeasured_at = "2026-11-10"\n\n[machine]\nsystem = "NVIDIA NVIDIA_DGX_Spark"\nkernel = "7.3.0-41-omarchy"\ngpu_driver = "615.78.08"\n\n[long]\nprompt_tokens = 30225\ndecode_tok_s = 35.1\n')
 prov_catalog = SimpleNamespace(root=str(measured_root), version="t",
-                               recipes={"model": recipe, "unmeasured": dict(recipe, id="unmeasured")},
+                               recipes={"model": recipe, "unmeasured": dict(recipe, id="unmeasured", hardware=[dict(recipe["hardware"][0], measured="measurements/missing.toml")])},
                                runtimes={"server": runtime}, best={"class": [entry]})
 rows = {row["id"]: row for row in a.recipe_listing(prov_catalog, profile, ())}
 measured = rows["model"]["measured"]

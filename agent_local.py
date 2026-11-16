@@ -1015,6 +1015,7 @@ def recipe_listing(catalog, profile, running=()):
       "context": variant["ctx"] if variant else None,
       "decode_tok_s": measured.get("long", {}).get("decode_tok_s"),
       "prefill_tok_s": measured.get("long", {}).get("prefill_tok_s"),
+      "measured": measured_record(measured),
     })
   return rows
 
@@ -1034,6 +1035,21 @@ def load_measurement(catalog, recipe, profile, gpu):
       except (OSError, KeyError, tomllib.TOMLDecodeError):
         return {}
   return {}
+
+
+def measured_record(record):
+  """The machine and prompt depth behind a card's speeds (minefield 35, 55): a class
+  orders its recipes from measurements taken on different machines and sessions, and a
+  variant's claimed context is only as good as the depth actually exercised."""
+  machine = record.get("machine") or {}
+  entry = {
+    "at": record.get("measured_at"),
+    "system": machine.get("system"),
+    "kernel": machine.get("kernel"),
+    "gpu_driver": machine.get("gpu_driver"),
+    "prompt_tokens": (record.get("long") or {}).get("prompt_tokens"),
+  }
+  return entry if any(value is not None for value in entry.values()) else None
 
 
 def load_review(catalog, runtime):
@@ -3672,7 +3688,7 @@ def shared_listing(record, catalog, profile, dns):
     if not model:
       continue
     recipe = catalog.recipes.get(rid) or (load_model(rid) or {}).get("recipe") or {}
-    measured = load_measurement(catalog, recipe, profile, gpu).get("long", {}) if gpu and recipe else {}
+    measurement = load_measurement(catalog, recipe, profile, gpu) if gpu and recipe else {}
     manifest = load_model(rid) or {}
     models.append({
       "recipe": rid,
@@ -3691,8 +3707,9 @@ def shared_listing(record, catalog, profile, dns):
       "expected_load_seconds": model["expected_load_seconds"],
       "expected_stop_seconds": model["expected_stop_seconds"],
       "observed": model["observed"],
-      "decode_tok_s": measured.get("decode_tok_s"),
-      "prefill_tok_s": measured.get("prefill_tok_s"),
+      "decode_tok_s": measurement.get("long", {}).get("decode_tok_s"),
+      "prefill_tok_s": measurement.get("long", {}).get("prefill_tok_s"),
+      "measured": measured_record(measurement),
     })
   return {
     "schema": NETWORK_SCHEMA,
@@ -3854,6 +3871,7 @@ def clean_listing(listing, dns):
     if not isinstance(model, dict) or not ID_RE.match(str(model.get("recipe", ""))):
       continue
     observed = model.get("observed") if isinstance(model.get("observed"), dict) else {}
+    claimed = model.get("measured") if isinstance(model.get("measured"), dict) else {}
     inputs = [value for value in model.get("input") or ["text"] if value in INPUTS] if isinstance(model.get("input"), list) else ["text"]
     ctx = _number(model.get("ctx"))
     tokens = _number(model.get("max_tokens"))
@@ -3874,6 +3892,14 @@ def clean_listing(listing, dns):
       "observed": {key: _number(observed.get(key)) for key in ("load_seconds", "ram_used_gib", "gpu_used_gib")} if observed else None,
       "decode_tok_s": _number(model.get("decode_tok_s")),
       "prefill_tok_s": _number(model.get("prefill_tok_s")),
+      # A peer's provenance for its own speeds, read as untrusted text and numbers.
+      "measured": {
+        "at": _clean(claimed.get("at") or "", 10) or None,
+        "system": _clean(claimed.get("system") or "", 120) or None,
+        "kernel": _clean(claimed.get("kernel") or "", 60) or None,
+        "gpu_driver": _clean(claimed.get("gpu_driver") or "", 30) or None,
+        "prompt_tokens": int(tokens) if (tokens := _number(claimed.get("prompt_tokens"))) else None,
+      } if claimed else None,
     })
   return {"ram_total_gib": _number(listing.get("ram_total_gib")), "models": models}
 
