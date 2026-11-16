@@ -679,6 +679,22 @@ with patch.object(a, "load_catalog", return_value=SimpleNamespace(version="t", r
      patch.object(a, "systemctl", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
   a.cmd_stop(["sticky"])
   check("a finished stop still records its seconds", os.path.exists(a.stop_seconds_path("sticky")))
+
+# One stuck stop must not leave the panel on "deactivating" or skip the other models.
+def stop_one_sticky(*args, **kwargs):
+  stuck = args[1] == a.unit_name("sticky-a")
+  return SimpleNamespace(returncode=1 if stuck else 0, stdout="", stderr="Stop job timed out" if stuck else "")
+status_writes = []
+with patch.object(a, "load_catalog", return_value=SimpleNamespace(version="t", recipes={})), \
+     patch.object(a, "machine_profile", return_value=profile), \
+     patch.object(a, "running_models", return_value=["sticky-a", "sticky-b"]), \
+     patch.object(a, "write_status", side_effect=lambda *args, **kwargs: status_writes.append(args[2] if len(args) > 2 else kwargs.get("transitions"))), \
+     patch.object(a, "evict_idle_weights"), \
+     patch.object(a, "systemctl", side_effect=stop_one_sticky) as two_stops:
+  raises("a stop that fails is reported after the others were tried", lambda: a.cmd_stop([]), "sticky-a")
+  check("the model after a stuck one is still stopped", ("stop", a.unit_name("sticky-b")) in [call.args for call in two_stops.call_args_list])
+  check("the panel leaves 'deactivating' once the stops are over", status_writes[-1] is None)
+  check("only the stopped model records a stop time", os.path.exists(a.stop_seconds_path("sticky-b")) and not os.path.exists(a.stop_seconds_path("sticky-a")))
 check("a pair's memory is shown against both machines", a.nodes_ram_gib({"pair": {"peer": "10.99.1.2"}}, {"ram_gib": 121.9, "pair": {"peer": "10.99.1.2", "ram_gib": 121.7}}) == 243.6 and a.nodes_ram_gib({}, {"ram_gib": 121.9, "pair": {"peer": "10.99.1.2", "ram_gib": 121.7}}) == 121.9)
 check("a pair's memory total is its own peer's, not a later link's", a.nodes_ram_gib({"pair": {"peer": "10.99.1.2"}, "profile": {"pair": {"peer": "10.99.1.2", "ram_gib": 121.7}}}, {"ram_gib": 121.9, "pair": {"peer": "10.99.1.3", "ram_gib": 60.0}}) == 243.6)
 

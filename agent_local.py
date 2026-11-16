@@ -3144,9 +3144,17 @@ def cmd_stop(argv):
     return 0
   # A model takes seconds to let go of its memory; the panel says so meanwhile.
   write_status(catalog, profile, {rid: "deactivating" for rid in targets})
+  stopped, failures = [], []
   for rid in targets:
     started = time.time()
-    stop_unit(rid)
+    try:
+      stop_unit(rid)
+    except LocalError as error:
+      # The others are still stopped, and the panel leaves "deactivating" below.
+      record_error(rid, error.short)
+      failures.append(error)
+      continue
+    stopped.append(rid)
     # How long this model takes to let go; the panel's stopping bar measures
     # the next stop against it.
     write_atomic(stop_seconds_path(rid), f"{time.time() - started:.1f}\n")
@@ -3154,7 +3162,10 @@ def cmd_stop(argv):
   # fight the kernel for.
   evict_idle_weights()
   write_status(catalog, profile)
-  say(f"Stopped {', '.join(targets)}")
+  if stopped:
+    say(f"Stopped {', '.join(stopped)}")
+  if failures:
+    raise LocalError("\n".join(str(error) for error in failures), short=failures[0].short)
   return 0
 
 
