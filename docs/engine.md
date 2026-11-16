@@ -210,8 +210,13 @@ the current manifest's observations until the new setup has been measured.
 
 `list.json` rows contain `id`, `name`, `summary`, `runtime`, `tier`, `publisher`,
 `vendor`, `architecture`, `installed`, `available`, `reason`, `best`, `active`,
-`memory_gib`, `context`, `decode_tok_s` and `prefill_tok_s`. Unavailable variants
-have null memory/context; missing measurements have null speeds.
+`memory_gib`, `context`, `decode_tok_s`, `prefill_tok_s` and `measured`. Unavailable variants
+have null memory/context; missing measurements have null speeds. `measured` is the
+machine and prompt depth behind the speeds — `at`, `system`, `kernel`, `gpu_driver`
+and `prompt_tokens` — because a class's order compares measurements from different
+machines and sessions, and a variant's claimed context is only as good as the depth
+actually exercised. A peer's listing carries the same block, cleaned as untrusted
+input.
 
 The panel calls plain `start <recipe>`, `stop <recipe>`, `remove <recipe>`,
 `use --detach <recipe>`, `refresh --quiet` on opening the add view, and
