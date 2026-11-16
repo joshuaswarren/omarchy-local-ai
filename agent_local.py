@@ -2678,7 +2678,9 @@ def activate(manifest, recipe, runtime, gpu, key, catalog, profile):
   if was_running:
     say(f"Restarting {rid} with the new setup (its in-flight requests are interrupted)")
     write_status(catalog, profile, {rid: "deactivating"})
-    systemctl("stop", unit_name(rid))
+    # The raise leaves the previous unit files and the (stuck) old server in
+    # place, so the activation aborts instead of colliding with its port.
+    stop_unit(rid)
   clear_error(rid)
   try:
     evict_idle_weights(keep=[rid])
@@ -3119,6 +3121,17 @@ def cmd_status(argv):
   return 0
 
 
+def stop_unit(rid):
+  """systemd's stop waits for the unit to be down. A stop that cannot finish
+  (a hung teardown, a stuck ExecStopPost) leaves the old server holding its
+  port and its memory while admission counts them free (minefield 53), so a
+  caller that reports success must refuse instead."""
+  result = systemctl("stop", unit_name(rid))
+  if result.returncode != 0:
+    raise LocalError(f"The stop of {rid} didn't finish: {result.stderr.strip() or 'systemd reported failure'}\n{journal_tail(rid)}",
+                     short=f"Stop of {rid} didn't finish")
+
+
 def cmd_stop(argv):
   parser = argparse.ArgumentParser(prog="omarchy agent local stop")
   parser.add_argument("recipe", nargs="?", help="the model to stop (default: every running one)")
@@ -3133,7 +3146,7 @@ def cmd_stop(argv):
   write_status(catalog, profile, {rid: "deactivating" for rid in targets})
   for rid in targets:
     started = time.time()
-    systemctl("stop", unit_name(rid))
+    stop_unit(rid)
     # How long this model takes to let go; the panel's stopping bar measures
     # the next stop against it.
     write_atomic(stop_seconds_path(rid), f"{time.time() - started:.1f}\n")
@@ -3231,7 +3244,7 @@ def cmd_remove(argv):
     if manifest is None and setting_up is not None:
       # Cancelled while its model loaded: activation starts the unit before
       # the manifest exists, so stop it before its files go.
-      systemctl("stop", unit_name(rid))
+      stop_unit(rid)
       # Read again: the setup may have reached its image since the first look.
       setting_up = load_installing(rid) or setting_up
       if setting_up.get("pair"):
@@ -3261,7 +3274,9 @@ def cmd_remove(argv):
     try:
       if running:
         say(f"Stopping {rid}")
-        systemctl("stop", unit_name(rid))
+        # Nothing is deleted until the unit is down: a stop that cannot finish
+        # would leave the server running on files the next lines unlink.
+        stop_unit(rid)
       deleting = time.time()
       if manifest:
         pair_remove(manifest, args.local_only)
